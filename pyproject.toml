@@ -1,0 +1,12 @@
+[project]
+name = "continual-go-baselines"
+version = "0.1.0"
+description = "Baseline implementations for the ContinualGo environment"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "continual-go",
+]
+
+[tool.uv.sources]
+continual-go = { git = "https://github.com/mikelma/continual-go" }

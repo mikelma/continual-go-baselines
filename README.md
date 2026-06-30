@@ -1,1 +1,1 @@
-# continual-go-baselines
+# Baselines for the Continual Go environment

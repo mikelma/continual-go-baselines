@@ -7,7 +7,8 @@ import jax.numpy as jnp
 import optax
 from flax import struct
 from flax.training.train_state import TrainState
-from jax.tree_util import tree_map
+from jax.tree_util import tree_map, tree_leaves, tree_map_with_path
+from trac_optimizer.experimental.jax.trac import start_trac # Import for using trac
 
 from src.configs import DQNConfig
 from src.networks.dqn_resnet import DQNResnetV2
@@ -29,6 +30,7 @@ class AgentState:
     q_train_state: TrainStateWithTargetNet
     buffer_state: Any                                  # (location, full, buffers)
     # agent_config and buffer are Python objects, not jax pytrees — mark static.
+    init_params : Any # For L2 Init and Wasserstein Regularization
     agent_config: DQNConfig = struct.field(pytree_node=False)
     buffer: ReplayBuffer = struct.field(pytree_node=False)
 
@@ -58,6 +60,11 @@ def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rn
     params = tree_map(lambda p: p.astype(default_float()), params)
 
     tx = optax.adam(learning_rate=agent_config.q_lr)
+
+    # Use the TRAC optimizer if enabled
+    if agent_config.trac : 
+        tx = start_trac(tx)
+
     base = TrainState.create(apply_fn=network.apply, params=params, tx=tx)
     q_train_state = TrainStateWithTargetNet(
         step=base.step,
@@ -75,6 +82,7 @@ def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rn
             buffer_state=buffer_state,
             agent_config=agent_config,
             buffer=buf,
+            init_params = params
         ),
         rng,
     )
@@ -117,6 +125,7 @@ def agent_step(agent_state: AgentState, obs: jnp.ndarray,legal_mask: jnp.ndarray
 @jax.jit
 def update_step(agent_state: AgentState, transition, rng):
     obs, action, next_obs, reward, terminated, truncated, _aux = transition
+    init_params = agent_state.init_params 
     cfg = agent_state.agent_config
     train_state = agent_state.q_train_state
     buf = agent_state.buffer
@@ -141,11 +150,26 @@ def update_step(agent_state: AgentState, transition, rng):
         target = reward_b + (1.0 - done_b) * cfg.gamma * q_next_target
 
         def _loss_fn(params):
+
+            def _wasserstein2(path,p,q):
+                if path[-1].key == 'kernel' : # Can check the naming by using tree_leaves_with_path
+                    return jnp.sum((jnp.sort(p.ravel()) - jnp.sort(q.ravel()))**2) # Preserve order statistics 
+                return jnp.float32(0.0)
+
             q_vals = train_state.apply_fn(params, obs_b)
             chosen_q = jnp.take_along_axis(
                 q_vals, jnp.expand_dims(action_b, axis=-1), axis=-1,
             ).squeeze(axis=-1)
-            return jnp.mean((chosen_q - target) ** 2)
+
+            loss = jnp.mean((chosen_q - target) ** 2)
+
+            #[TODO] : Can keep w2,l2init as a boolean. Currently, I am using 0 weight to disable both methods. 
+            if cfg.l2_init_weight != 0 : 
+                loss += cfg.l2_init_weight * sum(tree_leaves(tree_map(lambda p,q : jnp.sum((p - q) ** 2), params, init_params)))
+            if cfg.w2_weight != 0 : 
+                loss += cfg.w2_weight * sum(tree_leaves(tree_map_with_path(_wasserstein2, params, init_params)))
+
+            return loss
 
         loss, grads = jax.value_and_grad(_loss_fn)(train_state.params)
         updates, new_opt_state = train_state.tx.update(
@@ -189,6 +213,7 @@ def update_step(agent_state: AgentState, transition, rng):
         buffer_state=buffer_state,
         agent_config=cfg,
         buffer=buf,
+        init_params = init_params,
     )
     metrics = jnp.array([loss])
     return new_agent_state, metrics, rng

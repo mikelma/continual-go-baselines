@@ -35,3 +35,9 @@ class DQNConfig(BaseModel):
     total_steps: int = 1_000_000
     logging_freq: int = 1_000
     save_interval: int = 50_000
+
+    # Plasticity Interventions config 
+    activations : str = "relu" # Can choose amongst relu("relu"), concatenated relu ("crelu"), or deep fourier features("fourier")
+    l2_init_weight : float = 0.005 # Need to check the paper, I think generally it was 0.005
+    w2_weight : float = 0.005 # Reported as best hyperparam in the paper
+    trac : bool = False 

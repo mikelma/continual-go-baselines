@@ -54,7 +54,7 @@ def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rn
     buf = ReplayBuffer(buffer_size=agent_config.buffer_size, dummy_items=dummy_items)
     buffer_state = buf.initialize()
 
-    network = DQNResnetV2(action_dim=action_dim,num_channels=agent_config.num_channels,num_blocks=agent_config.num_blocks)
+    network = DQNResnetV2(action_dim=action_dim,num_channels=agent_config.num_channels,num_blocks=agent_config.num_blocks, activations = agent_config.activations)
     rng, init_rng = jax.random.split(rng)
     params = network.init(init_rng, jnp.zeros(obs_shape, dtype=default_float()))
     params = tree_map(lambda p: p.astype(default_float()), params)

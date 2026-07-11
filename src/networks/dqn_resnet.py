@@ -9,6 +9,13 @@ def fourier_features(x):
 
 _ACTIVATIONS = {"relu": nn.relu, "crelu": crelu, "fourier": fourier_features}
 
+"""
+For ReDo : 
+
+- Weights for both nn.Conv and nn.Dense are initialized according to LeCun Normal initialization.
+- Biases are initialized by zeros.
+- Using capture_intermediates won't work here, since the activation function is not a nn submodule.
+"""
 
 class ResBlock(nn.Module):
     channels: int
@@ -20,10 +27,12 @@ class ResBlock(nn.Module):
         x = nn.LayerNorm()(x)
         # x = nn.relu(x)
         x = _ACTIVATIONS[self.activations](x)
+        self.sow('intermediates', 'resnet_act_0', x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
         x = nn.LayerNorm()(x)
         # x = nn.relu(x)
         x = _ACTIVATIONS[self.activations](x)
+        self.sow('intermediates', 'resnet_act_1', x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
         return x + identity
 
@@ -48,11 +57,13 @@ class DQNResnetV2(nn.Module):
         x = nn.LayerNorm()(x)
         # x = nn.relu(x)
         x = _ACTIVATIONS[self.activations](x)
+        self.sow('intermediates', 'act_0', x)
 
         # q-head
         x = nn.Conv(2, (1, 1))(x)
         # x = nn.relu(x)
         x = _ACTIVATIONS[self.activations](x)
+        self.sow('intermediates', 'act_1', x)
         x = x.reshape((x.shape[0], -1))
         x = nn.Dense(self.action_dim, name="final_layer")(x)
 

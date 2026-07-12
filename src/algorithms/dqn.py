@@ -13,6 +13,7 @@ from trac_optimizer.experimental.jax.trac import start_trac # Import for using t
 from src.configs import DQNConfig
 from src.networks.dqn_resnet import DQNResnetV2
 from src.utils.replay_buffer import ReplayBuffer
+from src.utils.redo import ReDo
 from src.algorithms.agent import Agent
 
 
@@ -135,6 +136,27 @@ def update_step(agent_state: AgentState, transition, rng):
         agent_state.buffer_state, obs, next_obs, action, reward, done
     )
     train_state = train_state.replace(timesteps=train_state.timesteps + 1)
+
+    def _redo(args):
+        train_state, rng = args 
+        rng, rng_sample = jax.random.split(rng)
+        obs_b, next_obs_b, action_b, reward_b, done_b = buf.sample(
+            buffer_state, cfg.buffer_batch_size, rng_sample
+        )
+        obs_b = obs_b.astype(default_float())
+        train_state = ReDo(train_state, obs_b, cfg.num_blocks, cfg.redo_threshold, rng)
+        return train_state, rng 
+    
+    def _no_redo(args):
+        return args 
+    
+    is_redo_time = (
+        (train_state.timesteps % cfg.redo_interval ==0)
+        & (train_state.timesteps > cfg.learning_starts)
+        & buf.can_sample(buffer_state, cfg.buffer_batch_size)
+    )
+
+    train_state, rng = jax.lax.cond(is_redo_time, _redo, _no_redo, (train_state, rng))
 
     def _learn(args):
         train_state, rng = args

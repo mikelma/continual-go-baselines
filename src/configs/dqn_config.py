@@ -41,3 +41,7 @@ class DQNConfig(BaseModel):
     l2_init_weight : float = 0.005 # Need to check the paper, I think generally it was 0.005
     w2_weight : float = 0.005 # Reported as best hyperparam in the paper
     trac : bool = False 
+    # Redo specific configs, taken from the paper
+    redo_interval : int = 1000
+    num_blocks : int = 6
+    redo_threshold : float = 0.01

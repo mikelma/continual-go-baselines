@@ -1,4 +1,3 @@
-
 import datetime
 import os
 import pickle
@@ -9,7 +8,7 @@ import jax.numpy as jnp
 import tyro
 import wandb
 
-from continual_go import ContinualGo
+from continual_go import get_benchmark
 from src.configs import PPOConfig
 from src.algorithms.ppo import PPOAgent, Transition
 
@@ -18,26 +17,23 @@ def get_obs(state, k):
     return (state.turn * state.board / k)[..., None].astype(jnp.float32)
 
 
-def main(opponent_path: str = "checkpoints/000025.ckpt", cfg: PPOConfig = PPOConfig()):
+def main(benchmark: str = "9x9-k16-1", cfg: PPOConfig = PPOConfig()):
     if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
     wandb.init(project="continual-go-ppo", config=cfg.model_dump())
 
+    rng = jax.random.PRNGKey(cfg.seed)
+    agent_rng, env_rng = jax.random.split(rng)
+
     # env
-    env = ContinualGo.create(
-        size=cfg.board_size,
-        k=cfg.max_stones,
-        total_steps=cfg.total_steps,
-        opponent_path=opponent_path,
-    )
+    env_rng, key_bench = jax.random.split(env_rng)
+    env = get_benchmark(name=benchmark, key=key_bench)
     action_dim = env.num_actions
     obs_shape = (cfg.board_size, cfg.board_size, 1)
 
     # agent
-    agent_rng = jax.random.PRNGKey(cfg.seed)
     agent_state, agent_rng = PPOAgent.init_state(cfg, action_dim, obs_shape, agent_rng)
 
-    env_rng = jax.random.PRNGKey(cfg.seed)
     # initial env state
     state = env.init()
     obs = get_obs(state, env.k)
@@ -64,12 +60,15 @@ def main(opponent_path: str = "checkpoints/000025.ckpt", cfg: PPOConfig = PPOCon
         path = os.path.join(ckpt_dir, f"{int(env_steps):09d}.ckpt")
         with open(path, "wb") as f:
             pickle.dump(
-                {"config": cfg.model_dump(),
-                "opponent_path": opponent_path,
-                "actor_params": actor_params,
-                "critic_params": critic_params,
-                "env_steps": int(env_steps)},
-                f)
+                {
+                    "config": cfg.model_dump(),
+                    "benchmark": benchmark,
+                    "actor_params": actor_params,
+                    "critic_params": critic_params,
+                    "env_steps": int(env_steps),
+                },
+                f,
+            )
 
     # training step
 
@@ -77,16 +76,24 @@ def main(opponent_path: str = "checkpoints/000025.ckpt", cfg: PPOConfig = PPOCon
         state, obs, agent_state, agent_rng, env_rng = carry
 
         legal = env.legal_actions(state).reshape(-1)
-        action, value, log_prob, agent_rng = PPOAgent.step(agent_state, obs, legal, agent_rng)
+        action, value, log_prob, agent_rng = PPOAgent.step(
+            agent_state, obs, legal, agent_rng
+        )
 
         env_rng, step_rng = jax.random.split(env_rng)
         next_state, reward = env.step(step_rng, state, action)
-        #TODO: fix this in continual-go
+        # TODO: fix this in continual-go
         next_state = next_state.replace(ko=jnp.squeeze(next_state.ko))
         next_obs = get_obs(next_state, env.k)
 
         transition = Transition(
-            obs, action, reward.astype(jnp.float32), jnp.bool_(False), value, log_prob, legal,
+            obs,
+            action,
+            reward.astype(jnp.float32),
+            jnp.bool_(False),
+            value,
+            log_prob,
+            legal,
         )
         carry = (next_state, next_obs, agent_state, agent_rng, env_rng)
         return carry, transition
@@ -101,12 +108,18 @@ def main(opponent_path: str = "checkpoints/000025.ckpt", cfg: PPOConfig = PPOCon
         last_val = critic_train_state.apply_fn(critic_train_state.params, obs)
 
         # Update step
-        agent_state, metrics, agent_rng = PPOAgent.update(agent_state, traj_batch, last_val, agent_rng)
+        agent_state, metrics, agent_rng = PPOAgent.update(
+            agent_state, traj_batch, last_val, agent_rng
+        )
 
         # periodic log (one update = rollout_steps env steps)
         env_steps = (i + 1) * cfg.rollout_steps
         jax.debug.callback(
-            _flush_log, traj_batch.reward.mean(), metrics, env_steps, ordered=True,
+            _flush_log,
+            traj_batch.reward.mean(),
+            metrics,
+            env_steps,
+            ordered=True,
         )
 
         # TODO: save checkpoint

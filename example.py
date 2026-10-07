@@ -1,21 +1,18 @@
 import jax
-from continual_go import ContinualGo
+from continual_go import get_benchmark
 
 
 def main():
     key = jax.random.key(42)
 
-    env = ContinualGo.create(
-        size=9,
-        k=32,
-        total_steps=int(1e6),
-        opponent_path="../continual-go/alpha_zero/az_good.ckpt",  # NOTE replace with your own path
-    )
+    key_init, key_step = jax.random.split(key)
+
+    env = get_benchmark("9x9-k16-1", key_init)
 
     state = env.init()
 
     action = 0
-    state, reward = env.step(key, state, action)
+    state, reward = env.step(key_step, state, action)
 
     print(state)
 

@@ -17,7 +17,11 @@ def get_obs(state, k):
     return (state.turn * state.board / k)[..., None].astype(jnp.float32)
 
 
-def main(benchmark: str = "9x9-k16-1", cfg: DQNConfig = DQNConfig()):
+def main(
+    benchmark: str = "9x9-k16-1",
+    cache_dir: str = "cache_cgo",
+    cfg: DQNConfig = DQNConfig(),
+):
     if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
     wandb.init(project="continual-go-dqn", config=cfg.model_dump())
@@ -27,7 +31,7 @@ def main(benchmark: str = "9x9-k16-1", cfg: DQNConfig = DQNConfig()):
 
     # env
     env_rng, key_bench = jax.random.split(env_rng)
-    env = get_benchmark(name=benchmark, key=key_bench)
+    env = get_benchmark(name=benchmark, key=key_bench, opponent_cache_dir=cache_dir)
     action_dim = env.num_actions
     obs_shape = (cfg.board_size, cfg.board_size, 1)
 

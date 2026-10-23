@@ -33,7 +33,7 @@ def main(
     env_rng, key_bench = jax.random.split(env_rng)
     env = get_benchmark(name=benchmark, key=key_bench, opponent_cache_dir=cache_dir)
     action_dim = env.num_actions
-    obs_shape = (cfg.board_size, cfg.board_size, 1)
+    obs_shape = (env.size, env.size, 1)
 
     # agent
     agent_state, agent_rng = DQNAgent.init_state(cfg, action_dim, obs_shape, agent_rng)
@@ -52,15 +52,15 @@ def main(
     # logging callbacks
     def _flush_log(mean_reward, mean_loss, epsilon, env_steps):
         hours = (time.time() - wall_start) / 3600
-        wandb.log(
-            {
-                "env_steps": int(env_steps),
-                "avg_reward_per_step": float(mean_reward),
-                "loss": float(mean_loss),
-                "epsilon": float(epsilon),
-                "hours": hours,
-            }
-        )
+        log = {
+            "env_steps": int(env_steps),
+            "avg_reward_per_step": float(mean_reward),
+            "loss": float(mean_loss),
+            "epsilon": float(epsilon),
+            "hours": hours,
+        }
+        print(log)
+        wandb.log(log)
 
     def _save_ckpt(params, opt_state, env_steps):
         path = os.path.join(ckpt_dir, f"{int(env_steps):09d}.ckpt")

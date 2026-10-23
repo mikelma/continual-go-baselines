@@ -2,10 +2,6 @@ from pydantic import BaseModel
 
 
 class DQNConfig(BaseModel):
-    # env
-    board_size: int = 9
-    max_stones: int = 32
-
     # wandb
     wandb: bool = True
     # seeding
@@ -17,7 +13,7 @@ class DQNConfig(BaseModel):
 
     # dqn hyperparams
     gamma: float = 0.99
-    tau: float = 1.0                # 1.0 = hard target update
+    tau: float = 1.0  # 1.0 = hard target update
     q_lr: float = 1e-4
 
     buffer_size: int = 1_000_000

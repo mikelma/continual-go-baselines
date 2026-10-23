@@ -33,7 +33,7 @@ def main(
     env_rng, key_bench = jax.random.split(env_rng)
     env = get_benchmark(name=benchmark, key=key_bench, opponent_cache_dir=cache_dir)
     action_dim = env.num_actions
-    obs_shape = (cfg.board_size, cfg.board_size, 1)
+    obs_shape = (env.size, env.size, 1)
 
     # agent
     agent_state, agent_rng = PPOAgent.init_state(cfg, action_dim, obs_shape, agent_rng)
@@ -57,6 +57,7 @@ def main(
             "avg_reward_per_step": float(mean_reward),
             "hours": hours,
         }
+        print(log)
         log.update({name: float(v) for name, v in zip(PPOAgent.metric_names, metrics)})
         wandb.log(log)
 

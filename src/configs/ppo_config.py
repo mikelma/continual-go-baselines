@@ -2,10 +2,6 @@ from pydantic import BaseModel
 
 
 class PPOConfig(BaseModel):
-    # env
-    board_size: int = 9
-    max_stones: int = 32
-
     # wandb
     wandb: bool = True
     # seeding

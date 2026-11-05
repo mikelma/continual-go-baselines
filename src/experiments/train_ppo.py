@@ -20,27 +20,33 @@ def get_obs(state, k):
 def main(
     benchmark: str = "9x9-k16-1",
     cache_dir: str = "cache_cgo",
+    reps: int = 1,
     cfg: PPOConfig = PPOConfig(),
 ):
     if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
     wandb.init(project="continual-go-ppo", config=cfg.model_dump())
 
-    rng = jax.random.PRNGKey(cfg.seed)
-    agent_rng, env_rng = jax.random.split(rng)
+    env = get_benchmark(name=benchmark, opponent_cache_dir=cache_dir)
 
-    # env
-    env_rng, key_bench = jax.random.split(env_rng)
-    env = get_benchmark(name=benchmark, key=key_bench, opponent_cache_dir=cache_dir)
-    action_dim = env.num_actions
-    obs_shape = (env.size, env.size, 1)
+    def _gen_init_carry(seed):
+        agent_rng, env_rng = jax.random.split(seed)
 
-    # agent
-    agent_state, agent_rng = PPOAgent.init_state(cfg, action_dim, obs_shape, agent_rng)
+        # env
+        env_rng, key_bench = jax.random.split(env_rng)
+        action_dim = env.num_actions
+        obs_shape = (env.size, env.size, 1)
 
-    # initial env state
-    state = env.init()
-    obs = get_obs(state, env.k)
+        # agent
+        agent_state, agent_rng = PPOAgent.init_state(
+            cfg, action_dim, obs_shape, agent_rng
+        )
+
+        # initial env state
+        state = env.init()
+        obs = get_obs(state, env.k)
+
+        return state, obs, agent_state, agent_rng, env_rng
 
     # checkpoint dir
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -132,16 +138,19 @@ def main(
         carry = (state, obs, agent_state, agent_rng, env_rng)
         return carry, None
 
-    init_carry = (state, obs, agent_state, agent_rng, env_rng)
+    key = jax.random.PRNGKey(cfg.seed)
     num_updates = cfg.total_steps // cfg.rollout_steps
 
-    @jax.jit
+    keys = jax.random.split(key, num=reps)
+    init_carries = jax.vmap(_gen_init_carry)(keys)
+
+    @jax.vmap
     def run_training(init_carry):
         updates = jnp.arange(num_updates, dtype=jnp.int32)
         return jax.lax.scan(update_fn, init_carry, updates)
 
-    final_carry, _ = run_training(init_carry)
-    jax.block_until_ready(final_carry)
+    final_carries, _ = run_training(init_carries)
+    jax.block_until_ready(final_carries)
 
 
 if __name__ == "__main__":

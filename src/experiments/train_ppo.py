@@ -25,7 +25,21 @@ def main(
 ):
     if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
-    wandb.init(project="continual-go-ppo", config=cfg.model_dump())
+
+    # Initialize one W&B run per replica
+    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb_runs = []
+
+    if cfg.wandb:
+        for rep in range(reps):
+            run = wandb.init(
+                project="continual-go-ppo",
+                name=f"{benchmark}-seed{cfg.seed}-rep{rep}",
+                group=f"ppo_{now}",
+                config={**cfg.model_dump(), "rep": rep},
+                reinit="create_new",
+            )
+            wandb_runs.append(run)
 
     env = get_benchmark(name=benchmark, opponent_cache_dir=cache_dir)
 
@@ -49,23 +63,32 @@ def main(
         return state, obs, agent_state, agent_rng, env_rng
 
     # checkpoint dir
-    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     ckpt_dir = os.path.join("ppo/checkpoints", f"ppo_{now}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     wall_start = time.time()
 
-    # logging callbacks
-    def _flush_log(mean_reward, metrics, env_steps):
+    # logging callback
+    # Receives metrics for all replicas at once.
+    def _flush_log(mean_rewards, metrics, env_steps):
         hours = (time.time() - wall_start) / 3600
-        log = {
-            "env_steps": int(env_steps),
-            "avg_reward_per_step": float(mean_reward),
-            "hours": hours,
-        }
-        print(log)
-        log.update({name: float(v) for name, v in zip(PPOAgent.metric_names, metrics)})
-        wandb.log(log)
+        env_steps = int(env_steps)
+
+        for rep in range(reps):
+            log = {
+                "env_steps": env_steps,
+                "avg_reward_per_step": float(mean_rewards[rep]),
+                "hours": hours,
+            }
+
+            log.update(
+                {name: float(v) for name, v in zip(PPOAgent.metric_names, metrics[rep])}
+            )
+
+            print(f"rep={rep}", log)
+
+            if cfg.wandb:
+                wandb_runs[rep].log(log, step=env_steps)
 
     def _save_ckpt(actor_params, critic_params, env_steps):
         path = os.path.join(ckpt_dir, f"{int(env_steps):09d}.ckpt")
@@ -109,7 +132,7 @@ def main(
         carry = (next_state, next_obs, agent_state, agent_rng, env_rng)
         return carry, transition
 
-    def update_fn(carry, i):
+    def update_one(carry, i):
         # Collect a trajectory
         carry, traj_batch = jax.lax.scan(rollout_step, carry, None, cfg.rollout_steps)
         state, obs, agent_state, agent_rng, env_rng = carry
@@ -123,34 +146,53 @@ def main(
             agent_state, traj_batch, last_val, agent_rng
         )
 
-        # periodic log (one update = rollout_steps env steps)
+        carry = (state, obs, agent_state, agent_rng, env_rng)
+
+        # Return metrics instead of logging inside the replica-level update
+        return carry, (traj_batch.reward.mean(), metrics)
+
+    # Vectorized update + logging
+    def update_fn(carries, i):
+        # Execute all replicas in parallel
+        carries, (mean_rewards, metrics) = jax.vmap(
+            update_one,
+            in_axes=(0, None),
+        )(carries, i)
+
+        # One logging callback per training iteration
         env_steps = (i + 1) * cfg.rollout_steps
-        jax.debug.callback(
+
+        jax.experimental.io_callback(
             _flush_log,
-            traj_batch.reward.mean(),
+            None,
+            mean_rewards,
             metrics,
             env_steps,
             ordered=True,
         )
 
-        # TODO: save checkpoint
+        return carries, None
 
-        carry = (state, obs, agent_state, agent_rng, env_rng)
-        return carry, None
+    # training loop
+    num_updates = cfg.total_steps // cfg.rollout_steps
+
+    @jax.jit
+    def run_training(init_carries):
+        updates = jnp.arange(num_updates, dtype=jnp.int32)
+        return jax.lax.scan(update_fn, init_carries, updates)
 
     key = jax.random.PRNGKey(cfg.seed)
-    num_updates = cfg.total_steps // cfg.rollout_steps
 
     keys = jax.random.split(key, num=reps)
     init_carries = jax.vmap(_gen_init_carry)(keys)
 
-    @jax.vmap
-    def run_training(init_carry):
-        updates = jnp.arange(num_updates, dtype=jnp.int32)
-        return jax.lax.scan(update_fn, init_carry, updates)
-
     final_carries, _ = run_training(init_carries)
     jax.block_until_ready(final_carries)
+
+    # Ensure all logging callbacks have completed and finish runs
+    jax.effects_barrier()
+    for run in wandb_runs:
+        run.finish()
 
 
 if __name__ == "__main__":

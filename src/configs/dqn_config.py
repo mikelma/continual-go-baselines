@@ -6,6 +6,8 @@ class DQNConfig(BaseModel):
     wandb: bool = True
     # seeding
     seed: int = 42
+    # number of independent seeds vmapped in one process (seed i uses seed + i)
+    num_seeds: int = 1
 
     # network (alpha_zero resnetv2)
     num_channels: int = 128

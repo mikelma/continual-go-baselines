@@ -115,7 +115,7 @@ def agent_step(agent_state: AgentState, obs: jnp.ndarray,legal_mask: jnp.ndarray
 
 
 @jax.jit
-def update_step(agent_state: AgentState, transition, rng):
+def update_step(agent_state: AgentState, transition, t, rng):
     obs, action, next_obs, reward, terminated, truncated, _aux = transition
     cfg = agent_state.agent_config
     train_state = agent_state.q_train_state
@@ -163,10 +163,11 @@ def update_step(agent_state: AgentState, transition, rng):
         train_state, rng = args
         return train_state, rng, jnp.array(jnp.nan)
 
+    # Shared step t (timesteps == t + 1) keeps these predicates unbatched under vmap.
     is_learn_time = (
-        buf.can_sample(buffer_state, cfg.buffer_batch_size)
-        & (train_state.timesteps > cfg.learning_starts)
-        & (train_state.timesteps % cfg.training_interval == 0)
+        ((t + 1) >= cfg.buffer_batch_size)
+        & ((t + 1) > cfg.learning_starts)
+        & ((t + 1) % cfg.training_interval == 0)
     )
     train_state, rng, loss = jax.lax.cond(
         is_learn_time, _learn, _no_learn, (train_state, rng)
@@ -174,7 +175,7 @@ def update_step(agent_state: AgentState, transition, rng):
 
     # target network update
     train_state = jax.lax.cond(
-        train_state.timesteps % cfg.target_update_interval == 0,
+        (t + 1) % cfg.target_update_interval == 0,
         lambda ts: ts.replace(
             target_network_params=optax.incremental_update(
                 ts.params, ts.target_network_params, cfg.tau

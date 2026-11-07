@@ -45,12 +45,8 @@ def main(
             )
             wandb_runs.append(run)
 
-    # env (key_bench only seeds the skill scheduler's unused key, so the
-    # schedule is identical across seeds and the env is built once)
-    rng = jax.random.PRNGKey(cfg.seed)
-    _, env_rng = jax.random.split(rng)
-    env_rng, key_bench = jax.random.split(env_rng)
-    env = get_benchmark(name=benchmark, key=key_bench, opponent_cache_dir=cache_dir)
+    # env (the skill schedule is deterministic, so the env is built once)
+    env = get_benchmark(name=benchmark, opponent_cache_dir=cache_dir)
     action_dim = env.num_actions
     obs_shape = (env.size, env.size, 1)
 

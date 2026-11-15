@@ -20,13 +20,13 @@ class AgentState:
 
 
 class Transition(NamedTuple):
-    obs: jnp.ndarray        # o_t
-    action: jnp.ndarray     # a_t
-    reward: jnp.ndarray     # r[t+1]
-    done: jnp.ndarray       # done[t+1] (always False in ContinualGo)
-    value: jnp.ndarray      # v(o_t)
-    log_prob: jnp.ndarray   # log_prob Pi(a_t|o_t)
-    legal_mask: jnp.ndarray # legal actions at o_t
+    obs: jnp.ndarray  # o_t
+    action: jnp.ndarray  # a_t
+    reward: jnp.ndarray  # r[t+1]
+    done: jnp.ndarray  # done[t+1] (always False in ContinualGo)
+    value: jnp.ndarray  # v(o_t)
+    log_prob: jnp.ndarray  # log_prob Pi(a_t|o_t)
+    legal_mask: jnp.ndarray  # legal actions at o_t
 
 
 METRIC_NAMES = ("policy_loss", "value_loss", "entropy", "approx_kl")
@@ -36,15 +36,19 @@ def masked_logits(logits, legal_mask):
     return jnp.where(legal_mask, logits, jnp.finfo(logits.dtype).min)
 
 
-def init_agent_state(agent_config: PPOConfig, action_dim: int, obs_shape: tuple, rng: jax.random.PRNGKey):
+def init_agent_state(
+    agent_config: PPOConfig, action_dim: int, obs_shape: tuple, rng: jax.random.PRNGKey
+):
     actor_network = ActorResnetV2(
         action_dim=action_dim,
         num_channels=agent_config.num_channels,
         num_blocks=agent_config.num_blocks,
+        layer_norm=agent_config.layer_norm,
     )
     critic_network = CriticResnetV2(
         num_channels=agent_config.num_channels,
         num_blocks=agent_config.num_blocks,
+        layer_norm=agent_config.layer_norm,
     )
 
     init_x = jnp.zeros(obs_shape, dtype=jnp.float32)
@@ -87,10 +91,19 @@ def init_agent_state(agent_config: PPOConfig, action_dim: int, obs_shape: tuple,
 
 
 @jax.jit
-def agent_step(agent_state: AgentState, obs: jnp.ndarray, legal_mask: jnp.ndarray, rng: jax.random.PRNGKey):
-    logits = agent_state.actor_train_state.apply_fn(agent_state.actor_train_state.params, obs)
+def agent_step(
+    agent_state: AgentState,
+    obs: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    rng: jax.random.PRNGKey,
+):
+    logits = agent_state.actor_train_state.apply_fn(
+        agent_state.actor_train_state.params, obs
+    )
     logits = masked_logits(logits, legal_mask)
-    value = agent_state.critic_train_state.apply_fn(agent_state.critic_train_state.params, obs)
+    value = agent_state.critic_train_state.apply_fn(
+        agent_state.critic_train_state.params, obs
+    )
     rng, rng_a = jax.random.split(rng)
     action = jax.random.categorical(rng_a, logits=logits)
     log_prob = jax.nn.log_softmax(logits)[action]
@@ -102,14 +115,12 @@ def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef
     # Re-run the network through the batch
     value = critic_fn(critic_params, traj_batch.obs)
     # Calculate value loss
-    value_pred_clipped = traj_batch.value + (
-        value - traj_batch.value
-    ).clip(-clip_eps, clip_eps)
+    value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(
+        -clip_eps, clip_eps
+    )
     value_losses = jnp.square(value - targets)
     value_losses_clipped = jnp.square(value_pred_clipped - targets)
-    value_loss = (
-        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-    )
+    value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
     value_loss = vf_coef * value_loss
     return value_loss
 
@@ -121,7 +132,9 @@ def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
     logits = masked_logits(logits, traj_batch.legal_mask)
     all_log_probs = jax.nn.log_softmax(logits)
     log_prob = jnp.take_along_axis(
-        all_log_probs, jnp.expand_dims(traj_batch.action, axis=-1), axis=-1,
+        all_log_probs,
+        jnp.expand_dims(traj_batch.action, axis=-1),
+        axis=-1,
     ).squeeze(axis=-1)
     # Calculate actor loss
     log_ratio = log_prob - traj_batch.log_prob
@@ -140,18 +153,18 @@ def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
 
     # Calculate entropy (illegal actions have zero probability and contribute zero)
     probs = jnp.exp(all_log_probs)
-    entropy = -jnp.where(
-        traj_batch.legal_mask, probs * all_log_probs, 0.0
-    ).sum(axis=-1).mean()
+    entropy = (
+        -jnp.where(traj_batch.legal_mask, probs * all_log_probs, 0.0)
+        .sum(axis=-1)
+        .mean()
+    )
 
     loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
     loss_actor = loss_actor.mean()
 
     total_loss = loss_actor - ent_coef * entropy
 
-    aux_info = {'approx_kl': approx_kl,
-                'policy_loss': loss_actor,
-                'entropy': entropy}
+    aux_info = {"approx_kl": approx_kl, "policy_loss": loss_actor, "entropy": entropy}
 
     return total_loss, aux_info
 
@@ -171,6 +184,7 @@ def _calculate_gae(traj_batch, last_val, gamma, gae_lambda):
         advantages (jnp.ndarray): Advantages with shape (num_steps, _)
         targets (jnp.ndarray): Value targets with shape (num_steps, _)
     """
+
     def _get_advantages(gae_and_next_value, transition):
         gae, next_value = gae_and_next_value
         done, value, reward = (
@@ -179,11 +193,9 @@ def _calculate_gae(traj_batch, last_val, gamma, gae_lambda):
             transition.reward,
         )
         delta = reward + gamma * next_value * (1 - done) - value
-        gae = (
-            delta
-            + gamma * gae_lambda * (1 - done) * gae
-        )
+        gae = delta + gamma * gae_lambda * (1 - done) * gae
         return (gae, value), gae
+
     _, advantages = jax.lax.scan(
         _get_advantages,
         (jnp.zeros_like(last_val), last_val),
@@ -201,17 +213,27 @@ def _create_minibatches(config, batch, rng):
     minibatch_size = config.rollout_steps // config.num_mini_batch
     permutation = jax.random.permutation(rng, config.rollout_steps)
     shuffled_batch = jax.tree_util.tree_map(
-        lambda x: jnp.take(x, permutation, axis=0), batch)
+        lambda x: jnp.take(x, permutation, axis=0), batch
+    )
     return jax.tree_util.tree_map(
-        lambda x: x.reshape((config.num_mini_batch, minibatch_size,) + x.shape[1:]),
-        shuffled_batch)
+        lambda x: x.reshape(
+            (
+                config.num_mini_batch,
+                minibatch_size,
+            )
+            + x.shape[1:]
+        ),
+        shuffled_batch,
+    )
 
 
 @jax.jit
 def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
     cfg = agent_state.agent_config
     # calculate advantages and targets
-    advantages, targets = _calculate_gae(traj_batch, last_val, cfg.gamma, cfg.gae_lambda)
+    advantages, targets = _calculate_gae(
+        traj_batch, last_val, cfg.gamma, cfg.gae_lambda
+    )
 
     def _update_minibatch(carry_in, batch_info):
         actor_train_state, critic_train_state = carry_in
@@ -219,27 +241,41 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
         actor_grad_fn = jax.value_and_grad(policy_loss, has_aux=True)
 
         (_, aux_info), actor_grads = actor_grad_fn(
-            actor_train_state.params, actor_train_state.apply_fn, mb_traj_batch, mb_advantages,
-            cfg.clip_eps, cfg.entropy_coef)
+            actor_train_state.params,
+            actor_train_state.apply_fn,
+            mb_traj_batch,
+            mb_advantages,
+            cfg.clip_eps,
+            cfg.entropy_coef,
+        )
 
         actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
 
         critic_grad_fn = jax.value_and_grad(critic_loss)
         value_loss, critic_grads = critic_grad_fn(
-            critic_train_state.params, critic_train_state.apply_fn, mb_traj_batch, mb_targets,
-            cfg.clip_eps, cfg.vf_coef)
+            critic_train_state.params,
+            critic_train_state.apply_fn,
+            mb_traj_batch,
+            mb_targets,
+            cfg.clip_eps,
+            cfg.vf_coef,
+        )
 
         critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
-        aux_info['value_loss'] = value_loss
+        aux_info["value_loss"] = value_loss
         return (actor_train_state, critic_train_state), aux_info
 
     def _batch_update(update_state, unused):
         actor_train_state, critic_train_state, rng = update_state
         rng, rng_perm = jax.random.split(rng)
-        minibatches_info = _create_minibatches(cfg, (traj_batch, advantages, targets), rng_perm)
+        minibatches_info = _create_minibatches(
+            cfg, (traj_batch, advantages, targets), rng_perm
+        )
         # Loop through minibatches
         carry_in = (actor_train_state, critic_train_state)
-        carry_out, aux_info = jax.lax.scan(_update_minibatch, carry_in, minibatches_info)
+        carry_out, aux_info = jax.lax.scan(
+            _update_minibatch, carry_in, minibatches_info
+        )
         actor_train_state, critic_train_state = carry_out
         return (actor_train_state, critic_train_state, rng), aux_info
 
@@ -253,12 +289,14 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
         critic_train_state=critic_train_state,
         agent_config=cfg,
     )
-    metrics = jnp.array([
-        aux_info['policy_loss'].mean(),
-        aux_info['value_loss'].mean(),
-        aux_info['entropy'].mean(),
-        aux_info['approx_kl'].mean(),
-    ])
+    metrics = jnp.array(
+        [
+            aux_info["policy_loss"].mean(),
+            aux_info["value_loss"].mean(),
+            aux_info["entropy"].mean(),
+            aux_info["approx_kl"].mean(),
+        ]
+    )
     return new_agent_state, metrics, rng
 
 

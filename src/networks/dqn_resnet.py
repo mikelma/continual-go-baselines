@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 class ResBlock(nn.Module):
     channels: int
+    layer_norm: bool
 
     @nn.compact
     def __call__(self, x):
@@ -21,19 +22,21 @@ class DQNResnetV2(nn.Module):
     action_dim: int
     num_channels: int = 128
     num_blocks: int = 6
+    layer_norm: bool = True
 
     @nn.compact
     def __call__(self, x):
-        no_batch = (x.ndim == 3)
+        no_batch = x.ndim == 3
         if no_batch:
             x = x[None]
 
         x = nn.Conv(self.num_channels, (3, 3), padding="SAME")(x)
 
         for _ in range(self.num_blocks):
-            x = ResBlock(self.num_channels)(x)
+            x = ResBlock(channels=self.num_channels, layer_norm=self.layer_norm)(x)
 
-        x = nn.LayerNorm()(x)
+        if self.layer_norm:
+            x = nn.LayerNorm()(x)
         x = nn.relu(x)
 
         # q-head

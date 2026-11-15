@@ -24,6 +24,8 @@ class DQNConfig(BaseModel):
     training_interval: int = 4
     target_update_interval: int = 250
 
+    layer_norm: bool = True
+
     # epsilon schedule
     start_epsilon: float = 1.0
     end_epsilon: float = 0.01

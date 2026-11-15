@@ -25,6 +25,8 @@ class PPOConfig(BaseModel):
     gradient_clipping: bool = True
     max_grad_norm: float = 0.5
 
+    layer_norm: bool = True
+
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
 

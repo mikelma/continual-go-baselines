@@ -27,7 +27,7 @@ class TrainStateWithTargetNet(TrainState):
 @struct.dataclass
 class AgentState:
     q_train_state: TrainStateWithTargetNet
-    buffer_state: Any                                  # (location, full, buffers)
+    buffer_state: Any  # (location, full, buffers)
     # agent_config and buffer are Python objects, not jax pytrees — mark static.
     agent_config: DQNConfig = struct.field(pytree_node=False)
     buffer: ReplayBuffer = struct.field(pytree_node=False)
@@ -35,12 +35,16 @@ class AgentState:
 
 METRIC_NAMES = ("loss",)
 
+
 def linear_epsilon(cfg: DQNConfig, t):
     anneal = cfg.explore_frac * cfg.total_steps
     eps = ((cfg.end_epsilon - cfg.start_epsilon) / anneal) * t + cfg.start_epsilon
     return jnp.clip(eps, cfg.end_epsilon)
 
-def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rng: jax.random.PRNGKey):
+
+def init_agent_state(
+    agent_config: DQNConfig, action_dim: int, obs_shape: tuple, rng: jax.random.PRNGKey
+):
     # Buffer transition: (obs, next_obs, action, reward, done).
     dummy_items = (
         jnp.zeros(obs_shape, dtype=default_float()),
@@ -52,7 +56,12 @@ def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rn
     buf = ReplayBuffer(buffer_size=agent_config.buffer_size, dummy_items=dummy_items)
     buffer_state = buf.initialize()
 
-    network = DQNResnetV2(action_dim=action_dim,num_channels=agent_config.num_channels,num_blocks=agent_config.num_blocks)
+    network = DQNResnetV2(
+        action_dim=action_dim,
+        num_channels=agent_config.num_channels,
+        num_blocks=agent_config.num_blocks,
+        layer_norm=agent_config.layer_norm,
+    )
     rng, init_rng = jax.random.split(rng)
     params = network.init(init_rng, jnp.zeros(obs_shape, dtype=default_float()))
     params = tree_map(lambda p: p.astype(default_float()), params)
@@ -81,7 +90,13 @@ def init_agent_state(agent_config: DQNConfig,action_dim: int,obs_shape: tuple,rn
 
 
 @partial(jax.jit)
-def agent_step(agent_state: AgentState, obs: jnp.ndarray,legal_mask: jnp.ndarray,t,rng: jax.random.PRNGKey):
+def agent_step(
+    agent_state: AgentState,
+    obs: jnp.ndarray,
+    legal_mask: jnp.ndarray,
+    t,
+    rng: jax.random.PRNGKey,
+):
     cfg = agent_state.agent_config
     epsilon = linear_epsilon(cfg, t)
 
@@ -110,7 +125,7 @@ def agent_step(agent_state: AgentState, obs: jnp.ndarray,legal_mask: jnp.ndarray
         greedy_action_fn,
         rng,
     )
-    is_nongreedy = (action != argmax)
+    is_nongreedy = action != argmax
     return action.squeeze(), rng_out, {"epsilon": epsilon, "is_nongreedy": is_nongreedy}
 
 
@@ -136,20 +151,26 @@ def update_step(agent_state: AgentState, transition, t, rng):
         obs_b = obs_b.astype(default_float())
         next_obs_b = next_obs_b.astype(default_float())
 
-        q_next_target = train_state.apply_fn(train_state.target_network_params, next_obs_b)
+        q_next_target = train_state.apply_fn(
+            train_state.target_network_params, next_obs_b
+        )
         q_next_target = jnp.max(q_next_target, axis=-1)
         target = reward_b + (1.0 - done_b) * cfg.gamma * q_next_target
 
         def _loss_fn(params):
             q_vals = train_state.apply_fn(params, obs_b)
             chosen_q = jnp.take_along_axis(
-                q_vals, jnp.expand_dims(action_b, axis=-1), axis=-1,
+                q_vals,
+                jnp.expand_dims(action_b, axis=-1),
+                axis=-1,
             ).squeeze(axis=-1)
             return jnp.mean((chosen_q - target) ** 2)
 
         loss, grads = jax.value_and_grad(_loss_fn)(train_state.params)
         updates, new_opt_state = train_state.tx.update(
-            grads, train_state.opt_state, train_state.params,
+            grads,
+            train_state.opt_state,
+            train_state.params,
         )
         new_params = optax.apply_updates(train_state.params, updates)
         new_train_state = train_state.replace(

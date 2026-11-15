@@ -36,7 +36,7 @@ def main(
                 project="continual-go-ppo",
                 name=f"{benchmark}-seed{cfg.seed}-rep{rep}",
                 group=f"ppo_{now}",
-                config={**cfg.model_dump(), "rep": rep},
+                config={**cfg.model_dump(), "rep": rep, "benchmark": benchmark},
                 reinit="create_new",
             )
             wandb_runs.append(run)

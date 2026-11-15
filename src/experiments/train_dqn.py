@@ -40,7 +40,11 @@ def main(
                 project="continual-go-dqn",
                 name=f"{benchmark}-seed{cfg.seed + i}",
                 group=f"dqn_{now}",
-                config={**cfg.model_dump(), "seed": cfg.seed + i},
+                config={
+                    **cfg.model_dump(),
+                    "seed": cfg.seed + i,
+                    "benchmark": benchmark,
+                },
                 reinit="create_new",
             )
             wandb_runs.append(run)
@@ -59,7 +63,9 @@ def main(
         agent_rng, env_rng = jax.random.split(rng)
         env_rng, _key_bench = jax.random.split(env_rng)
 
-        agent_state, agent_rng = DQNAgent.init_state(cfg, action_dim, obs_shape, agent_rng)
+        agent_state, agent_rng = DQNAgent.init_state(
+            cfg, action_dim, obs_shape, agent_rng
+        )
 
         state = env.init()
         obs = get_obs(state, env.k)

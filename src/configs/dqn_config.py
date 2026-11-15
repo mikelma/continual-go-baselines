@@ -25,6 +25,7 @@ class DQNConfig(BaseModel):
     target_update_interval: int = 250
 
     layer_norm: bool = True
+    weight_decay: float = 0.0
 
     # epsilon schedule
     start_epsilon: float = 1.0

@@ -56,18 +56,20 @@ def init_agent_state(
     actor_network_params = actor_network.init(actor_rng, init_x)
     critic_network_params = critic_network.init(critic_rng, init_x)
 
+    actor_chain, critic_chain = [], []
+
+    actor_chain.append(optax.add_decayed_weights(agent_config.weight_decay))
+    critic_chain.append(optax.add_decayed_weights(agent_config.weight_decay))
+
     if agent_config.gradient_clipping:
-        tx_actor = optax.chain(
-            optax.clip_by_global_norm(agent_config.max_grad_norm),
-            optax.adam(agent_config.actor_lr, eps=1e-5),
-        )
-        tx_critic = optax.chain(
-            optax.clip_by_global_norm(agent_config.max_grad_norm),
-            optax.adam(agent_config.critic_lr, eps=1e-5),
-        )
-    else:
-        tx_actor = optax.adam(agent_config.actor_lr, eps=1e-5)
-        tx_critic = optax.adam(agent_config.critic_lr, eps=1e-5)
+        actor_chain.append(optax.clip_by_global_norm(agent_config.max_grad_norm))
+        critic_chain.append(optax.clip_by_global_norm(agent_config.max_grad_norm))
+
+    actor_chain.append(optax.adam(agent_config.actor_lr, eps=1e-5))
+    critic_chain.append(optax.adam(agent_config.critic_lr, eps=1e-5))
+
+    tx_actor = optax.chain(*actor_chain)
+    tx_critic = optax.chain(*critic_chain)
 
     actor_train_state = TrainState.create(
         apply_fn=actor_network.apply,

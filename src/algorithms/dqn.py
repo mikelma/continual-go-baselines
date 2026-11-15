@@ -66,7 +66,10 @@ def init_agent_state(
     params = network.init(init_rng, jnp.zeros(obs_shape, dtype=default_float()))
     params = tree_map(lambda p: p.astype(default_float()), params)
 
-    tx = optax.adam(learning_rate=agent_config.q_lr)
+    tx = optax.chain(
+        optax.add_decayed_weights(agent_config.weight_decay),
+        optax.adam(learning_rate=agent_config.q_lr),
+    )
     base = TrainState.create(apply_fn=network.apply, params=params, tx=tx)
     q_train_state = TrainStateWithTargetNet(
         step=base.step,

@@ -26,6 +26,7 @@ class PPOConfig(BaseModel):
     max_grad_norm: float = 0.5
 
     layer_norm: bool = True
+    weight_decay: float = 0.0
 
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4

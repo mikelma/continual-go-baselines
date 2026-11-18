@@ -216,6 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
 wandb/
 checkpoints/
 cache_cgo/
+figures/

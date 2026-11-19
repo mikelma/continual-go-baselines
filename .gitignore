@@ -221,3 +221,4 @@ wandb/
 checkpoints/
 cache_cgo/
 figures/
+csv/

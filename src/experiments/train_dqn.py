@@ -19,7 +19,7 @@ def get_obs(state, k):
 
 
 def main(
-    benchmark: str = "9x9-k16-1",
+    benchmark: str = "9x9-k16-C",
     cache_dir: str = "cache_cgo",
     cfg: DQNConfig = DQNConfig(),
 ):
@@ -37,7 +37,7 @@ def main(
     if cfg.wandb:
         for i in range(num_seeds):
             run = wandb.init(
-                project="continual-go-dqn",
+                project="continual-go-dqn-sweep",
                 name=f"{benchmark}-seed{cfg.seed + i}",
                 group=f"dqn_{now}",
                 config={

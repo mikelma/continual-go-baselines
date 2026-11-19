@@ -37,7 +37,7 @@ def main(
     if cfg.wandb:
         for i in range(num_seeds):
             run = wandb.init(
-                project="continual-go-dqn-sweep",
+                project="continual-go-dqn",
                 name=f"{benchmark}-seed{cfg.seed + i}",
                 group=f"dqn_{now}",
                 config={

@@ -55,7 +55,13 @@ def main(
     obs_shape = (env.size, env.size, 1)
 
     # log accumulator: (sum_reward, sum_loss, count_loss, last_epsilon)
-    init_log_acc = (jnp.float32(0.0), jnp.float32(0.0), jnp.int32(0), jnp.float32(0.0))
+    init_log_acc = (
+        jnp.float32(0.0),
+        jnp.float32(0.0),
+        jnp.int32(0),
+        jnp.float32(0.0),
+        jnp.float32(0.0),
+    )
 
     # per-seed init, vmapped over seeds. key splits match a single-seed run
     def init_seed(seed):
@@ -85,7 +91,7 @@ def main(
 
     # logging callback
     # Receives metrics for all seeds at once ([num_seeds] arrays).
-    def _flush_log(mean_rewards, mean_losses, epsilons, env_steps):
+    def _flush_log(mean_rewards, mean_losses, epsilons, l2_norms, env_steps):
         now = time.perf_counter()
         hours = (time.time() - wall_start) / 3600
         env_steps = int(env_steps)
@@ -113,6 +119,7 @@ def main(
                 "avg_reward_per_step": float(mean_rewards[i]),
                 "loss": float(mean_losses[i]),
                 "epsilon": float(epsilons[i]),
+                "l2_norm": float(l2_norms[i]),
                 "hours": hours,
                 **perf_log,
             }
@@ -166,15 +173,15 @@ def main(
 
         # log accumulation
         reward_f = reward.astype(jnp.float32)
-        loss_val = metrics[0]
+        loss_val, l2_norm = metrics
         eps_val = aux["epsilon"].astype(jnp.float32)
 
-        sum_r, sum_l, count_l, _last_eps = log_acc
+        sum_r, sum_l, count_l, _last_eps, _last_l2 = log_acc
         sum_r = sum_r + reward_f
         is_real = ~jnp.isnan(loss_val)
         sum_l = sum_l + jnp.where(is_real, loss_val, jnp.float32(0.0))
         count_l = count_l + is_real.astype(jnp.int32)
-        new_log_acc = (sum_r, sum_l, count_l, eps_val)
+        new_log_acc = (sum_r, sum_l, count_l, eps_val, l2_norm)
 
         return (next_state, next_obs, agent_state, agent_rng, env_rng, new_log_acc)
 
@@ -186,7 +193,7 @@ def main(
         log_step = ((t + 1) % cfg.logging_freq) == 0
 
         def do_log(acc):
-            sr, sl, cl, le = acc
+            sr, sl, cl, le, l2 = acc
             mean_r = sr / jnp.float32(cfg.logging_freq)
             mean_l = sl / jnp.maximum(cl, 1).astype(jnp.float32)
             jax.debug.callback(
@@ -194,11 +201,12 @@ def main(
                 mean_r,
                 mean_l,
                 le,
+                l2,
                 t + 1,
                 ordered=True,
             )
             # reset sums; keep the last epsilon
-            return (jnp.zeros_like(sr), jnp.zeros_like(sl), jnp.zeros_like(cl), le)
+            return (jnp.zeros_like(sr), jnp.zeros_like(sl), jnp.zeros_like(cl), le, l2)
 
         def no_log(acc):
             return acc

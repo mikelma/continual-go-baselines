@@ -19,6 +19,11 @@ def default_float():
     return jax.dtypes.canonicalize_dtype(jnp.float32)
 
 
+def kernel_l2_norm(params):
+    kernels = optax.tree_utils.tree_get_all_with_path(params, "kernel")
+    return optax.tree_utils.tree_norm([v for _, v in kernels], ord=2)
+
+
 class TrainStateWithTargetNet(TrainState):
     target_network_params: flax.core.FrozenDict
     timesteps: int
@@ -33,7 +38,10 @@ class AgentState:
     buffer: ReplayBuffer = struct.field(pytree_node=False)
 
 
-METRIC_NAMES = ("loss",)
+METRIC_NAMES = (
+    "loss",
+    "l2_norm",
+)
 
 
 def linear_epsilon(cfg: DQNConfig, t):
@@ -215,7 +223,8 @@ def update_step(agent_state: AgentState, transition, t, rng):
         agent_config=cfg,
         buffer=buf,
     )
-    metrics = jnp.array([loss])
+    l2_norm = kernel_l2_norm(train_state.params)
+    metrics = jnp.array([loss, l2_norm])
     return new_agent_state, metrics, rng
 
 

@@ -29,7 +29,19 @@ class Transition(NamedTuple):
     legal_mask: jnp.ndarray  # legal actions at o_t
 
 
-METRIC_NAMES = ("policy_loss", "value_loss", "entropy", "approx_kl")
+METRIC_NAMES = (
+    "policy_loss",
+    "value_loss",
+    "entropy",
+    "approx_kl",
+    "actor_kernels_l2",
+    "critic_kernels_l2",
+)
+
+
+def kernel_l2_norm(params):
+    kernels = optax.tree_utils.tree_get_all_with_path(params, "kernel")
+    return optax.tree_utils.tree_norm([v for _, v in kernels], ord=2)
 
 
 def masked_logits(logits, legal_mask):
@@ -265,6 +277,8 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
 
         critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
         aux_info["value_loss"] = value_loss
+        aux_info["actor_kernels_l2"] = kernel_l2_norm(actor_train_state.params)
+        aux_info["critic_kernels_l2"] = kernel_l2_norm(critic_train_state.params)
         return (actor_train_state, critic_train_state), aux_info
 
     def _batch_update(update_state, unused):
@@ -297,6 +311,8 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
             aux_info["value_loss"].mean(),
             aux_info["entropy"].mean(),
             aux_info["approx_kl"].mean(),
+            aux_info["actor_kernels_l2"].mean(),
+            aux_info["critic_kernels_l2"].mean(),
         ]
     )
     return new_agent_state, metrics, rng

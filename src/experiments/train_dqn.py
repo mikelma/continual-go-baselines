@@ -19,7 +19,7 @@ def get_obs(state, k):
 
 
 def main(
-    benchmark: str = "9x9-k16-1",
+    benchmark: str = "9x9-k16-C",
     cache_dir: str = "cache_cgo",
     cfg: DQNConfig = DQNConfig(),
 ):

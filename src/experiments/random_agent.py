@@ -48,7 +48,7 @@ def main(
     keys = jax.random.split(key, num=reps)
     batched_rwds = jax.vmap(_full_episode, in_axes=(0, None))(keys, total_steps)
 
-    avg_rwds = batched_rwds.reshape(reps, window, -1).mean(axis=1)
+    avg_rwds = batched_rwds.reshape(reps, -1, window).mean(axis=-1)
 
     if log_wandb:
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -67,7 +67,7 @@ def main(
         for rep, run in enumerate(wandb_runs):
             for i, rwd in enumerate(avg_rwds_np[rep]):
                 run.log(
-                    {"avg_reward_per_step": float(rwd), "env_steps": i * window},
+                    {"avg_reward_per_step": float(rwd), "env_steps": (i + 1) * window},
                     step=i,
                 )
             run.finish()

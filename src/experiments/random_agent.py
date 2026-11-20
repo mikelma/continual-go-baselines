@@ -25,7 +25,7 @@ def main(
     total_steps: int = int(1e6),
     log_wandb: bool = True,
 ):
-    if not wandb:
+    if not log_wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
     env = get_benchmark(name=benchmark, opponent_cache_dir=cache_dir)

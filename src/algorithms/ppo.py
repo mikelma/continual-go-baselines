@@ -414,7 +414,6 @@ def apply_redo(
     # NOTE kernel_init has to match the original ResNet initializer
     kernel_init=nn.initializers.lecun_normal(),
 ) -> jnp.ndarray:
-    jax.debug.print("redo!")
     _, mut = apply_fn(
         params,
         obs,

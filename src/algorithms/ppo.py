@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 from flax import struct
 from flax.training.train_state import TrainState
+import flax.linen as nn
 
 from src.configs import PPOConfig
 from src.networks.ppo_resnet import ActorResnetV2, CriticResnetV2
@@ -36,7 +37,32 @@ METRIC_NAMES = (
     "approx_kl",
     "actor_kernels_l2",
     "critic_kernels_l2",
+    "dormant",
 )
+
+
+def _capture_conv(mdl: nn.Module, method_name: str) -> bool:
+    return method_name == "__call__" and isinstance(mdl, nn.Conv)
+
+
+def dormant_fraction(
+    mut,
+    tau: float = 0.025,
+    eps: float = 1e-8,
+) -> jnp.ndarray:
+    intermediates = mut.get("intermediates", {})
+    dormant = jnp.array(0.0, dtype=jnp.float32)
+    total = jnp.array(0.0, dtype=jnp.float32)
+
+    for leaf in jax.tree_util.tree_leaves(intermediates):
+        act = jax.nn.relu(leaf)
+        # last axis is channels
+        mean_act = act.mean(axis=tuple(range(act.ndim - 1)))
+        scores = mean_act / (mean_act.mean() + eps)
+        dormant = dormant + jnp.sum(scores <= tau)
+        total = total + scores.size
+
+    return jnp.where(total > 0, dormant / total, 0.0)
 
 
 def kernel_l2_norm(params):
@@ -142,7 +168,12 @@ def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef
 @partial(jax.jit, static_argnums=(1,))
 def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
     # Re-run the network through the batch
-    logits = actor_fn(actor_params, traj_batch.obs)
+    logits, mutables = actor_fn(
+        actor_params,
+        traj_batch.obs,
+        mutable=["intermediates"],
+        capture_intermediates=_capture_conv,
+    )
     logits = masked_logits(logits, traj_batch.legal_mask)
     all_log_probs = jax.nn.log_softmax(logits)
     log_prob = jnp.take_along_axis(
@@ -178,7 +209,14 @@ def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
 
     total_loss = loss_actor - ent_coef * entropy
 
-    aux_info = {"approx_kl": approx_kl, "policy_loss": loss_actor, "entropy": entropy}
+    dormant = dormant_fraction(mutables)
+
+    aux_info = {
+        "approx_kl": approx_kl,
+        "policy_loss": loss_actor,
+        "entropy": entropy,
+        "dormant": dormant,
+    }
 
     return total_loss, aux_info
 
@@ -310,6 +348,7 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
             aux_info["policy_loss"].mean(),
             aux_info["value_loss"].mean(),
             aux_info["entropy"].mean(),
+            aux_info["dormant"].mean(),
             aux_info["approx_kl"].mean(),
             aux_info["actor_kernels_l2"].mean(),
             aux_info["critic_kernels_l2"].mean(),

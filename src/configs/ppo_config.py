@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class PPOConfig(BaseModel):
@@ -30,6 +31,9 @@ class PPOConfig(BaseModel):
 
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
+
+    # apply ReDo after N PPO updates
+    redo_freq: Optional[int] = None
 
     # training loop
     total_steps: int = 1_000_000

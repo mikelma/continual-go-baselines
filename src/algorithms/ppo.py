@@ -34,10 +34,11 @@ METRIC_NAMES = (
     "policy_loss",
     "value_loss",
     "entropy",
+    "actor_dormant",
+    "critic_dormant",
     "approx_kl",
     "actor_kernels_l2",
     "critic_kernels_l2",
-    "dormant",
 )
 
 
@@ -153,7 +154,12 @@ def agent_step(
 @partial(jax.jit, static_argnums=(1,))
 def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef):
     # Re-run the network through the batch
-    value = critic_fn(critic_params, traj_batch.obs)
+    value, mutables = critic_fn(
+        critic_params,
+        traj_batch.obs,
+        mutable=["intermediates"],
+        capture_intermediates=_capture_conv,
+    )
     # Calculate value loss
     value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(
         -clip_eps, clip_eps
@@ -162,7 +168,11 @@ def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef
     value_losses_clipped = jnp.square(value_pred_clipped - targets)
     value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
     value_loss = vf_coef * value_loss
-    return value_loss
+
+    aux = {}
+    aux["dormant"] = dormant_fraction(mutables)
+
+    return value_loss, aux
 
 
 @partial(jax.jit, static_argnums=(1,))
@@ -215,7 +225,7 @@ def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
         "approx_kl": approx_kl,
         "policy_loss": loss_actor,
         "entropy": entropy,
-        "dormant": dormant,
+        "actor_dormant": dormant,
     }
 
     return total_loss, aux_info
@@ -303,8 +313,8 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
 
         actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
 
-        critic_grad_fn = jax.value_and_grad(critic_loss)
-        value_loss, critic_grads = critic_grad_fn(
+        critic_grad_fn = jax.value_and_grad(critic_loss, has_aux=True)
+        (value_loss, critic_aux), critic_grads = critic_grad_fn(
             critic_train_state.params,
             critic_train_state.apply_fn,
             mb_traj_batch,
@@ -317,6 +327,7 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
         aux_info["value_loss"] = value_loss
         aux_info["actor_kernels_l2"] = kernel_l2_norm(actor_train_state.params)
         aux_info["critic_kernels_l2"] = kernel_l2_norm(critic_train_state.params)
+        aux_info["critic_dormant"] = critic_aux["dormant"]
         return (actor_train_state, critic_train_state), aux_info
 
     def _batch_update(update_state, unused):
@@ -338,23 +349,117 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
     update_state, aux_info = jax.lax.scan(_batch_update, update_state, None, cfg.epochs)
     actor_train_state, critic_train_state, rng = update_state
 
+    rng, kra, krc = jax.random.split(rng, num=3)
+
+    # ReDo
+    do_redo = (
+        cfg.redo_freq is not None and (actor_train_state.step % cfg.redo_freq) == 0
+    )
+    actor_train_state, rng = _maybe_redo(
+        actor_train_state, traj_batch.obs, rng, do_redo
+    )
+    critic_train_state, rng = _maybe_redo(
+        critic_train_state, traj_batch.obs, rng, do_redo
+    )
+
     new_agent_state = AgentState(
         actor_train_state=actor_train_state,
         critic_train_state=critic_train_state,
         agent_config=cfg,
     )
+
     metrics = jnp.array(
         [
             aux_info["policy_loss"].mean(),
             aux_info["value_loss"].mean(),
             aux_info["entropy"].mean(),
-            aux_info["dormant"].mean(),
+            aux_info["actor_dormant"].mean(),
+            aux_info["critic_dormant"].mean(),
             aux_info["approx_kl"].mean(),
             aux_info["actor_kernels_l2"].mean(),
             aux_info["critic_kernels_l2"].mean(),
         ]
     )
     return new_agent_state, metrics, rng
+
+
+def _maybe_redo(
+    train_state: TrainState, obs: jnp.ndarray, rng: jax.random.PRNGKey, do_redo: bool
+):
+    rng, key = jax.random.split(rng)
+    new_params = jax.lax.cond(
+        do_redo,
+        lambda: apply_redo(train_state.params, train_state.apply_fn, obs, key),
+        lambda: train_state.params,
+    )
+    return train_state.replace(params=new_params), rng
+
+
+def _dormant_mask(
+    act: jnp.ndarray, tau: float = 0.025, eps: float = 1e-8
+) -> jnp.ndarray:
+    """Boolean mask of shape (C,) for post-ReLU conv channels."""
+    act = jax.nn.relu(act)
+    mean_act = act.mean(axis=tuple(range(act.ndim - 1)))
+    scores = mean_act / (mean_act.mean() + eps)
+    return scores <= tau
+
+
+def apply_redo(
+    params,
+    apply_fn,
+    obs: jnp.ndarray,
+    rng: jax.random.PRNGKey,
+    tau: float = 0.025,
+    # NOTE kernel_init has to match the original ResNet initializer
+    kernel_init=nn.initializers.lecun_normal(),
+) -> jnp.ndarray:
+    jax.debug.print("redo!")
+    _, mut = apply_fn(
+        params,
+        obs,
+        mutable=["intermediates"],
+        capture_intermediates=_capture_conv,
+    )
+    intermediates = mut.get("intermediates", {})
+
+    # Collect dormant masks (C,) for each captured Conv output in execution order
+    masks = [
+        _dormant_mask(leaf, tau=tau)
+        for leaf in jax.tree.leaves(intermediates)
+        if leaf.ndim >= 2  # Prevents selecting biases
+    ]
+    if not masks:
+        return params  # Nothing to do
+
+    # Fresh weights matching `params` structure
+    leaves, treedef = jax.tree.flatten(params)
+    subkeys = jax.random.split(rng, len(leaves))
+    fresh_leaves = [
+        kernel_init(k, leaf.shape, dtype=leaf.dtype)
+        if leaf.ndim >= 2
+        else jnp.zeros_like(leaf)
+        for k, leaf in zip(subkeys, leaves)
+    ]
+
+    # Reset dormant `out_c` channels on conv kernels and zero matching `in_c`'s
+    conv_idx = 0
+    new_leaves = []
+    for leaf, fresh in zip(leaves, fresh_leaves):
+        if leaf.ndim == 4:  # (kh, kw, in_c, out_c)
+            # Zero outgoing weights from any earlier layer with matching channel count
+            for m in masks[:conv_idx]:
+                if m.shape[0] == leaf.shape[-2]:
+                    leaf = jnp.where(~m[None, None, :, None], leaf, 0.0)
+
+            # Reinitialize dormant output channels of this conv layer
+            if conv_idx < len(masks) and masks[conv_idx].shape[0] == leaf.shape[-1]:
+                m = masks[conv_idx]
+                leaf = jnp.where(m[None, None, None, :], fresh, leaf)
+                conv_idx += 1
+        new_leaves.append(leaf)
+
+    return jax.tree.unflatten(treedef, new_leaves)
 
 
 PPOAgent = Agent(init_agent_state, agent_step, update_step, METRIC_NAMES)

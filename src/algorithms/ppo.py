@@ -356,10 +356,10 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
         cfg.redo_freq is not None and (actor_train_state.step % cfg.redo_freq) == 0
     )
     actor_train_state, rng = _maybe_redo(
-        actor_train_state, traj_batch.obs, rng, do_redo
+        actor_train_state, traj_batch.obs, rng, do_redo, cfg.redo_tau
     )
     critic_train_state, rng = _maybe_redo(
-        critic_train_state, traj_batch.obs, rng, do_redo
+        critic_train_state, traj_batch.obs, rng, do_redo, cfg.redo_tau
     )
 
     new_agent_state = AgentState(
@@ -384,12 +384,16 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
 
 
 def _maybe_redo(
-    train_state: TrainState, obs: jnp.ndarray, rng: jax.random.PRNGKey, do_redo: bool
+    train_state: TrainState,
+    obs: jnp.ndarray,
+    rng: jax.random.PRNGKey,
+    do_redo: bool,
+    tau: float,
 ):
     rng, key = jax.random.split(rng)
     new_params = jax.lax.cond(
         do_redo,
-        lambda: apply_redo(train_state.params, train_state.apply_fn, obs, key),
+        lambda: apply_redo(train_state.params, train_state.apply_fn, obs, key, tau=tau),
         lambda: train_state.params,
     )
     return train_state.replace(params=new_params), rng

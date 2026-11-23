@@ -34,6 +34,7 @@ class PPOConfig(BaseModel):
 
     # apply ReDo after N PPO updates
     redo_freq: Optional[int] = None
+    redo_tau: float = 0.025
 
     # training loop
     total_steps: int = 1_000_000

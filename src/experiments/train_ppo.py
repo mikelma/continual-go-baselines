@@ -38,6 +38,7 @@ def main(
                 group=f"ppo_{now}",
                 config={**cfg.model_dump(), "rep": rep, "benchmark": benchmark},
                 reinit="create_new",
+                tags=cfg.wandb_tags,
             )
             wandb_runs.append(run)
 

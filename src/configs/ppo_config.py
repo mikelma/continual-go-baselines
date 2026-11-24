@@ -5,6 +5,7 @@ from typing import Optional
 class PPOConfig(BaseModel):
     # wandb
     wandb: bool = True
+    wandb_tags: list[str] = []
     # seeding
     seed: int = 42
 

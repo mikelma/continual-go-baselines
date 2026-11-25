@@ -9,10 +9,12 @@ class ResBlock(nn.Module):
     @nn.compact
     def __call__(self, x):
         identity = x
-        x = nn.LayerNorm()(x)
+        if self.layer_norm:
+            x = nn.LayerNorm()(x)
         x = nn.relu(x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
-        x = nn.LayerNorm()(x)
+        if self.layer_norm:
+            x = nn.LayerNorm()(x)
         x = nn.relu(x)
         x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
         return x + identity

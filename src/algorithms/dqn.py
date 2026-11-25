@@ -74,8 +74,14 @@ def init_agent_state(
     params = network.init(init_rng, jnp.zeros(obs_shape, dtype=default_float()))
     params = tree_map(lambda p: p.astype(default_float()), params)
 
+    # Mask to prevent decaying LayerNorm's params
+    wd_mask = jax.tree_util.tree_map(
+        lambda p: p.ndim > 1,
+        params,
+    )
+
     tx = optax.chain(
-        optax.add_decayed_weights(agent_config.weight_decay),
+        optax.add_decayed_weights(agent_config.weight_decay, mask=wd_mask),
         optax.adam(learning_rate=agent_config.q_lr),
     )
     base = TrainState.create(apply_fn=network.apply, params=params, tx=tx)

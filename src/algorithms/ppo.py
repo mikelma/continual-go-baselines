@@ -98,8 +98,22 @@ def init_agent_state(
 
     actor_chain, critic_chain = [], []
 
-    actor_chain.append(optax.add_decayed_weights(agent_config.weight_decay))
-    critic_chain.append(optax.add_decayed_weights(agent_config.weight_decay))
+    # Masks to prevent decaying LayerNorm's params
+    actor_wd_mask = jax.tree_util.tree_map(
+        lambda p: p.ndim > 1,
+        actor_network_params,
+    )
+    critic_wd_mask = jax.tree_util.tree_map(
+        lambda p: p.ndim > 1,
+        critic_network_params,
+    )
+
+    actor_chain.append(
+        optax.add_decayed_weights(agent_config.weight_decay, mask=actor_wd_mask)
+    )
+    critic_chain.append(
+        optax.add_decayed_weights(agent_config.weight_decay, mask=critic_wd_mask)
+    )
 
     if agent_config.gradient_clipping:
         actor_chain.append(optax.clip_by_global_norm(agent_config.max_grad_norm))
@@ -153,7 +167,9 @@ def agent_step(
 
 
 @partial(jax.jit, static_argnums=(1,))
-def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef):
+def critic_loss(
+    critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef, redo_tau
+):
     # Re-run the network through the batch
     value, mutables = critic_fn(
         critic_params,
@@ -171,13 +187,13 @@ def critic_loss(critic_params, critic_fn, traj_batch, targets, clip_eps, vf_coef
     value_loss = vf_coef * value_loss
 
     aux = {}
-    aux["dormant"] = dormant_fraction(mutables)
+    aux["dormant"] = dormant_fraction(mutables, tau=redo_tau)
 
     return value_loss, aux
 
 
 @partial(jax.jit, static_argnums=(1,))
-def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
+def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef, redo_tau):
     # Re-run the network through the batch
     logits, mutables = actor_fn(
         actor_params,
@@ -220,7 +236,7 @@ def policy_loss(actor_params, actor_fn, traj_batch, gae, clip_eps, ent_coef):
 
     total_loss = loss_actor - ent_coef * entropy
 
-    dormant = dormant_fraction(mutables)
+    dormant = dormant_fraction(mutables, tau=redo_tau)
 
     aux_info = {
         "approx_kl": approx_kl,
@@ -310,6 +326,7 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
             mb_advantages,
             cfg.clip_eps,
             cfg.entropy_coef,
+            cfg.redo_tau,
         )
 
         actor_train_state = actor_train_state.apply_gradients(grads=actor_grads)
@@ -322,6 +339,7 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
             mb_targets,
             cfg.clip_eps,
             cfg.vf_coef,
+            cfg.redo_tau,
         )
 
         critic_train_state = critic_train_state.apply_gradients(grads=critic_grads)
@@ -350,12 +368,10 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
     update_state, aux_info = jax.lax.scan(_batch_update, update_state, None, cfg.epochs)
     actor_train_state, critic_train_state, rng = update_state
 
-    rng, kra, krc = jax.random.split(rng, num=3)
-
     # ReDo
-    do_redo = (
-        cfg.redo_freq is not None and (actor_train_state.step % cfg.redo_freq) == 0
-    )
+    updates_per_step = cfg.epochs * cfg.num_mini_batch
+    num_update_steps = actor_train_state.step // updates_per_step
+    do_redo = cfg.redo_freq is not None and (num_update_steps % cfg.redo_freq) == 0
     actor_train_state, rng = _maybe_redo(
         actor_train_state, traj_batch.obs, rng, do_redo, cfg.num_blocks, cfg.redo_tau
     )
@@ -393,19 +409,19 @@ def _maybe_redo(
     tau: float,
 ):
     rng, key = jax.random.split(rng)
-    new_params = jax.lax.cond(
+    new_train_state = jax.lax.cond(
         do_redo,
         lambda: apply_redo(
-            train_state.params,
+            train_state,
             train_state.apply_fn,
             obs,
             key,
             num_res_blocks=num_res_blocks,
             tau=tau,
         ),
-        lambda: train_state.params,
+        lambda: train_state,
     )
-    return train_state.replace(params=new_params), rng
+    return new_train_state, rng
 
 
 def _dormant_mask(
@@ -425,8 +441,24 @@ def _get_activation(intermediates, module_path):
     return node["__call__"][-1]
 
 
+def _zero_moment_slice(moment_tree, path, mask, axis):
+    node = moment_tree
+    for key in path[:-1]:
+        node = node[key]
+    moment = node[path[-1]]
+
+    shape = [1] * moment.ndim
+    shape[axis] = mask.shape[0]
+
+    node[path[-1]] = jnp.where(
+        mask.reshape(shape),
+        jnp.zeros_like(moment),
+        moment,
+    )
+
+
 def apply_redo(
-    params,
+    train_state: TrainState,
     apply_fn,
     obs: jnp.ndarray,
     rng: jax.random.PRNGKey,
@@ -434,7 +466,9 @@ def apply_redo(
     tau: float = 0.025,
     # NOTE kernel_init has to match the original ResNet initializer
     kernel_init=nn.initializers.lecun_normal(),
-):
+) -> TrainState:
+    params = train_state.params
+
     _, mut = apply_fn(
         params,
         obs,
@@ -444,10 +478,29 @@ def apply_redo(
     activations = mut.get("intermediates", {})
 
     # Make params mutable
-    was_frozen = isinstance(params, core.FrozenDict)
+    params_frozen = isinstance(params, core.FrozenDict)
     params = core.unfreeze(params)
     p = params["params"]
 
+    # Get Adam's parameters and make them mutable
+    opt_state = train_state.opt_state
+    adam_chain_state = opt_state[-1]  # ty: ignore
+    adam_state = adam_chain_state[0]
+
+    if not isinstance(adam_state, optax.ScaleByAdamState):
+        raise TypeError("Expected Optax Adam state.")
+
+    mu_frozen = isinstance(adam_state.mu, core.FrozenDict)
+    nu_frozen = isinstance(adam_state.nu, core.FrozenDict)
+
+    mu = core.unfreeze(adam_state.mu)  # ty: ignore
+    nu = core.unfreeze(adam_state.nu)  # ty: ignore
+
+    def reset_moments(path, mask, axis):
+        _zero_moment_slice(mu, path, mask, axis)
+        _zero_moment_slice(nu, path, mask, axis)
+
+    # One key per conv layer
     keys = jax.random.split(rng, num_res_blocks + 1)
 
     # Recycle conv1 in every residual block
@@ -472,12 +525,25 @@ def apply_redo(
             fresh_kernel,
             kernel,
         )
+
         if "bias" in block["conv1"]:
             block["conv1"]["bias"] = jnp.where(
                 mask,
                 0.0,
                 block["conv1"]["bias"],
             )
+            reset_moments(
+                ("params", f"res{i}", "conv1", "bias"),
+                mask,
+                axis=0,
+            )
+
+        # Reset Adam's parameters of incoming weights
+        reset_moments(
+            ("params", f"res{i}", "conv1", "kernel"),
+            mask,
+            axis=-1,
+        )
 
         # Zero outgoing weights
         kernel = block["conv2"]["kernel"]
@@ -486,6 +552,13 @@ def apply_redo(
             mask[None, None, :, None],
             0.0,
             kernel,
+        )
+
+        # Reset Adam's parameters of outgoing weights
+        reset_moments(
+            ("params", f"res{i}", "conv2", "kernel"),
+            mask,
+            axis=-2,
         )
 
     # Recycle head_conv
@@ -504,11 +577,21 @@ def apply_redo(
         fresh_kernel,
         kernel,
     )
+    reset_moments(
+        ("params", "head_conv", "kernel"),
+        mask,
+        axis=-1,
+    )
     if "bias" in p["head_conv"]:
         p["head_conv"]["bias"] = jnp.where(
             mask,
             0.0,
             p["head_conv"]["bias"],
+        )
+        reset_moments(
+            ("params", "head_conv", "bias"),
+            mask,
+            axis=0,
         )
 
     # Outgoing weights (head_conv -> final_layer)
@@ -524,8 +607,31 @@ def apply_redo(
         0.0,
         dense_kernel,
     )
+    reset_moments(
+        ("params", "final_layer", "kernel"),
+        dense_mask,
+        axis=0,
+    )
 
-    return core.freeze(params) if was_frozen else params
+    new_params = core.freeze(params) if params_frozen else params
+
+    # Re-construct Adam's state
+    new_mu = core.freeze(mu) if mu_frozen else mu
+    new_nu = core.freeze(nu) if nu_frozen else nu
+
+    new_adam_state = optax.ScaleByAdamState(
+        count=adam_state.count,  # maintain counter
+        mu=new_mu,
+        nu=new_nu,
+    )
+    new_adam_chain_state = (new_adam_state,) + adam_chain_state[1:]  # ty: ignore
+    new_opt_state = opt_state[:-1] + (new_adam_chain_state,)  # ty: ignore
+
+    # Re-construct TrainState
+    return train_state.replace(
+        params=new_params,
+        opt_state=new_opt_state,
+    )
 
 
 PPOAgent = Agent(init_agent_state, agent_step, update_step, METRIC_NAMES)

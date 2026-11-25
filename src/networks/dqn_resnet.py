@@ -5,6 +5,7 @@ import jax.numpy as jnp
 class ResBlock(nn.Module):
     channels: int
     layer_norm: bool
+    name: str = "res"
 
     @nn.compact
     def __call__(self, x):
@@ -12,11 +13,11 @@ class ResBlock(nn.Module):
         if self.layer_norm:
             x = nn.LayerNorm()(x)
         x = nn.relu(x)
-        x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
+        x = nn.Conv(self.channels, (3, 3), padding="SAME", name="conv1")(x)
         if self.layer_norm:
             x = nn.LayerNorm()(x)
         x = nn.relu(x)
-        x = nn.Conv(self.channels, (3, 3), padding="SAME")(x)
+        x = nn.Conv(self.channels, (3, 3), padding="SAME", name="conv2")(x)
         return x + identity
 
 

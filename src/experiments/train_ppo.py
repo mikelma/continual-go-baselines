@@ -26,6 +26,10 @@ def main(
     if not cfg.wandb:
         os.environ["WANDB_MODE"] = "disabled"
 
+    assert not (cfg.redo_freq is not None and cfg.layer_norm), (
+        "LayerNorm and ReDo cannot be activated at the same time."
+    )
+
     # Initialize one W&B run per replica
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     wandb_runs = []

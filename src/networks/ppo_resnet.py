@@ -16,17 +16,19 @@ class ActorResnetV2(nn.Module):
         if no_batch:
             x = x[None]
 
-        x = nn.Conv(self.num_channels, (3, 3), padding="SAME")(x)
+        x = nn.Conv(self.num_channels, (3, 3), padding="SAME", name="in_conv")(x)
 
-        for _ in range(self.num_blocks):
-            x = ResBlock(channels=self.num_channels, layer_norm=self.layer_norm)(x)
+        for i in range(self.num_blocks):
+            x = ResBlock(
+                channels=self.num_channels, layer_norm=self.layer_norm, name=f"res{i}"
+            )(x)
 
         if self.layer_norm:
             x = nn.LayerNorm()(x)
         x = nn.relu(x)
 
         # policy head
-        x = nn.Conv(2, (1, 1))(x)
+        x = nn.Conv(2, (1, 1), name="head_conv")(x)
         x = nn.relu(x)
         x = x.reshape((x.shape[0], -1))
         logits = nn.Dense(self.action_dim, name="final_layer")(x)
@@ -47,17 +49,19 @@ class CriticResnetV2(nn.Module):
         if no_batch:
             x = x[None]
 
-        x = nn.Conv(self.num_channels, (3, 3), padding="SAME")(x)
+        x = nn.Conv(self.num_channels, (3, 3), padding="SAME", name="in_conv")(x)
 
-        for _ in range(self.num_blocks):
-            x = ResBlock(channels=self.num_channels, layer_norm=self.layer_norm)(x)
+        for i in range(self.num_blocks):
+            x = ResBlock(
+                channels=self.num_channels, layer_norm=self.layer_norm, name=f"res{i}"
+            )(x)
 
         if self.layer_norm:
             x = nn.LayerNorm()(x)
         x = nn.relu(x)
 
         # value head
-        x = nn.Conv(2, (1, 1))(x)
+        x = nn.Conv(2, (1, 1), name="head_conv")(x)
         x = nn.relu(x)
         x = x.reshape((x.shape[0], -1))
         value = nn.Dense(1, name="final_layer")(x)

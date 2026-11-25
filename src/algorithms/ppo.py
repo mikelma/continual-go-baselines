@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 from flax import struct
 from flax.training.train_state import TrainState
+from flax import core
 import flax.linen as nn
 
 from src.configs import PPOConfig
@@ -356,10 +357,10 @@ def update_step(agent_state: AgentState, traj_batch: Transition, last_val, rng):
         cfg.redo_freq is not None and (actor_train_state.step % cfg.redo_freq) == 0
     )
     actor_train_state, rng = _maybe_redo(
-        actor_train_state, traj_batch.obs, rng, do_redo, cfg.redo_tau
+        actor_train_state, traj_batch.obs, rng, do_redo, cfg.num_blocks, cfg.redo_tau
     )
     critic_train_state, rng = _maybe_redo(
-        critic_train_state, traj_batch.obs, rng, do_redo, cfg.redo_tau
+        critic_train_state, traj_batch.obs, rng, do_redo, cfg.num_blocks, cfg.redo_tau
     )
 
     new_agent_state = AgentState(
@@ -388,12 +389,20 @@ def _maybe_redo(
     obs: jnp.ndarray,
     rng: jax.random.PRNGKey,
     do_redo: bool,
+    num_res_blocks: int,
     tau: float,
 ):
     rng, key = jax.random.split(rng)
     new_params = jax.lax.cond(
         do_redo,
-        lambda: apply_redo(train_state.params, train_state.apply_fn, obs, key, tau=tau),
+        lambda: apply_redo(
+            train_state.params,
+            train_state.apply_fn,
+            obs,
+            key,
+            num_res_blocks=num_res_blocks,
+            tau=tau,
+        ),
         lambda: train_state.params,
     )
     return train_state.replace(params=new_params), rng
@@ -402,11 +411,18 @@ def _maybe_redo(
 def _dormant_mask(
     act: jnp.ndarray, tau: float = 0.025, eps: float = 1e-8
 ) -> jnp.ndarray:
-    """Boolean mask of shape (C,) for post-ReLU conv channels."""
+    """Boolean mask of shape (C,) for conv channels."""
     act = jax.nn.relu(act)
     mean_act = act.mean(axis=tuple(range(act.ndim - 1)))
     scores = mean_act / (mean_act.mean() + eps)
     return scores <= tau
+
+
+def _get_activation(intermediates, module_path):
+    node = intermediates
+    for name in module_path:
+        node = node[name]
+    return node["__call__"][-1]
 
 
 def apply_redo(
@@ -414,55 +430,102 @@ def apply_redo(
     apply_fn,
     obs: jnp.ndarray,
     rng: jax.random.PRNGKey,
+    num_res_blocks: int,
     tau: float = 0.025,
     # NOTE kernel_init has to match the original ResNet initializer
     kernel_init=nn.initializers.lecun_normal(),
-) -> jnp.ndarray:
+):
     _, mut = apply_fn(
         params,
         obs,
         mutable=["intermediates"],
         capture_intermediates=_capture_conv,
     )
-    intermediates = mut.get("intermediates", {})
+    activations = mut.get("intermediates", {})
 
-    # Collect dormant masks (C,) for each captured Conv output in execution order
-    masks = [
-        _dormant_mask(leaf, tau=tau)
-        for leaf in jax.tree.leaves(intermediates)
-        if leaf.ndim >= 2  # Prevents selecting biases
-    ]
-    if not masks:
-        return params  # Nothing to do
+    # Make params mutable
+    was_frozen = isinstance(params, core.FrozenDict)
+    params = core.unfreeze(params)
+    p = params["params"]
 
-    # Fresh weights matching `params` structure
-    leaves, treedef = jax.tree.flatten(params)
-    subkeys = jax.random.split(rng, len(leaves))
-    fresh_leaves = [
-        kernel_init(k, leaf.shape, dtype=leaf.dtype)
-        if leaf.ndim >= 2
-        else jnp.zeros_like(leaf)
-        for k, leaf in zip(subkeys, leaves)
-    ]
+    keys = jax.random.split(rng, num_res_blocks + 1)
 
-    # Reset dormant `out_c` channels on conv kernels and zero matching `in_c`'s
-    conv_idx = 0
-    new_leaves = []
-    for leaf, fresh in zip(leaves, fresh_leaves):
-        if leaf.ndim == 4:  # (kh, kw, in_c, out_c)
-            # Zero outgoing weights from any earlier layer with matching channel count
-            for m in masks[:conv_idx]:
-                if m.shape[0] == leaf.shape[-2]:
-                    leaf = jnp.where(~m[None, None, :, None], leaf, 0.0)
+    # Recycle conv1 in every residual block
+    for i in range(num_res_blocks):
+        block = p[f"res{i}"]
 
-            # Reinitialize dormant output channels of this conv layer
-            if conv_idx < len(masks) and masks[conv_idx].shape[0] == leaf.shape[-1]:
-                m = masks[conv_idx]
-                leaf = jnp.where(m[None, None, None, :], fresh, leaf)
-                conv_idx += 1
-        new_leaves.append(leaf)
+        # Get activations and dormancy mask
+        activation = activations[f"res{i}"]["conv1"]["__call__"][-1]
+        mask = _dormant_mask(activation, tau)
 
-    return jax.tree.unflatten(treedef, new_leaves)
+        # Reinitialize incoming weights
+        kernel = block["conv1"]["kernel"]
+
+        fresh_kernel = kernel_init(
+            keys[i],
+            kernel.shape,
+            dtype=kernel.dtype,
+        )
+
+        block["conv1"]["kernel"] = jnp.where(
+            mask[None, None, None, :],
+            fresh_kernel,
+            kernel,
+        )
+        if "bias" in block["conv1"]:
+            block["conv1"]["bias"] = jnp.where(
+                mask,
+                0.0,
+                block["conv1"]["bias"],
+            )
+
+        # Zero outgoing weights
+        kernel = block["conv2"]["kernel"]
+
+        block["conv2"]["kernel"] = jnp.where(
+            mask[None, None, :, None],
+            0.0,
+            kernel,
+        )
+
+    # Recycle head_conv
+    activation = activations["head_conv"]["__call__"][-1]
+    mask = _dormant_mask(activation, tau)
+
+    # Incoming weights
+    kernel = p["head_conv"]["kernel"]
+    fresh_kernel = kernel_init(
+        keys[-1],
+        kernel.shape,
+        dtype=kernel.dtype,
+    )
+    p["head_conv"]["kernel"] = jnp.where(
+        mask[None, None, None, :],
+        fresh_kernel,
+        kernel,
+    )
+    if "bias" in p["head_conv"]:
+        p["head_conv"]["bias"] = jnp.where(
+            mask,
+            0.0,
+            p["head_conv"]["bias"],
+        )
+
+    # Outgoing weights (head_conv -> final_layer)
+    # activations have NHWC shape
+    height, width = activation.shape[-3:-1]
+
+    dense_mask = jnp.tile(mask, height * width)
+
+    dense_kernel = p["final_layer"]["kernel"]
+
+    p["final_layer"]["kernel"] = jnp.where(
+        dense_mask[:, None],
+        0.0,
+        dense_kernel,
+    )
+
+    return core.freeze(params) if was_frozen else params
 
 
 PPOAgent = Agent(init_agent_state, agent_step, update_step, METRIC_NAMES)
